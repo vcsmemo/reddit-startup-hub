@@ -5,6 +5,11 @@ on:
     - cron: '0 */4 * * *'  # 每 4 小时运行一次
   workflow_dispatch:        # 支持手动触发
 
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -24,14 +29,23 @@ jobs:
         run: python src/fetcher.py
         env:
           CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-        # 如果 CF_WORKER_URL 未设置，则回退到 RSS 抓取（可能被 403）
-        # 首次运行可能失败，先设置好 CF Worker 后再运行
+        # 如果 CF_WORKER_URL 未设置，回退到 RSS 抓取（可能被 403）
+        continue-on-error: true
+
+      - name: Fallback to seed data if fetch failed
+        run: |
+          if [ ! -f data/posts.json ] || [ ! -s data/posts.json ]; then
+            echo "No data fetched, using seed data..."
+            python src/seed_mock.py
+          fi
+        continue-on-error: true
 
       - name: Build static site
         run: python src/build_site.py
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
+        if: github.ref == 'refs/heads/main'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./static
