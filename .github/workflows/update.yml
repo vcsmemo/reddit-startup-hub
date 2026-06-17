@@ -25,11 +25,11 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Fetch Reddit data (via CF Worker proxy)
-        run: python src/fetcher.py
-        env:
-          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-        # 如果 CF_WORKER_URL 未设置，回退到 RSS 抓取（可能被 403）
+      - name: Fetch Reddit data (direct + fallback)
+        run: |
+          # 直接请求 Reddit（GitHub Actions IP 可能未被限制）
+          # 不设置 CF_WORKER_URL，让 fetcher 直接请求 Reddit
+          python src/fetcher.py
         continue-on-error: true
 
       - name: Fallback to seed data if fetch failed
