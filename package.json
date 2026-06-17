@@ -1,0 +1,10 @@
+{
+  "name": "reddit-startup-hub",
+  "version": "1.0.0",
+  "description": "Reddit 创业情报站 - 自动抓取 Reddit 创业社区，AI 提取结构化信息",
+  "scripts": {
+    "fetch": "python3 src/fetcher.py",
+    "export": "python3 src/fetcher.py export",
+    "build": "python3 src/fetcher.py && python3 src/build_site.py"
+  }
+}
