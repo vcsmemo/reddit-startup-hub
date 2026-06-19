@@ -14,7 +14,7 @@ TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Reddit 创业情报站 · Reddit Startup Hub</title>
+<title>HN TechHub · HackerNews + TechMeme 科技情报站</title>
 <style>
 :root {
   --bg: #0f172a;
@@ -121,13 +121,13 @@ footer { text-align: center; padding: 32px 0; color: var(--muted); font-size: 0.
 <body>
 <div class="container">
   <header>
-    <h1>Reddit 创业情报站</h1>
-    <p>自动追踪 Reddit 创业社区（SaaS / startups / indiehackers / Entrepreneur 等）的热门帖子，提取结构化创业情报</p>
+    <h1>HN TechHub</h1>
+    <p>自动追踪 HackerNews 热门帖子 + TechMeme 科技新闻，提取结构化科技情报</p>
   </header>
 
   <div class="stats-bar">
     <div class="stat"><div class="num" id="stat-total">0</div><div class="label">帖子总数</div></div>
-    <div class="stat"><div class="num" id="stat-subs">0</div><div class="label">Subreddits</div></div>
+    <div class="stat"><div class="num" id="stat-subs">0</div><div class="label">Sources</div></div>
     <div class="stat"><div class="num" id="stat-revenue">0</div><div class="label">含收入数据</div></div>
     <div class="stat"><div class="num" id="stat-today">0</div><div class="label">今日更新</div></div>
     <div class="stat"><div class="num" id="stat-categories">0</div><div class="label">分类</div></div>
@@ -140,7 +140,7 @@ footer { text-align: center; padding: 32px 0; color: var(--muted); font-size: 0.
 
   <div class="filters">
     <label>筛选：</label>
-    <select id="filter-subreddit"><option value="">全部 Subreddit</option></select>
+    <select id="filter-source"><option value="">全部 Source</option></select>
     <select id="filter-category"><option value="">全部分类</option></select>
     <select id="filter-sentiment"><option value="">全部情绪</option><option value="positive">积极</option><option value="negative">消极</option><option value="neutral">中性</option></select>
     <select id="filter-revenue"><option value="">全部</option><option value="1">含收入数据</option></select>
@@ -152,7 +152,7 @@ footer { text-align: center; padding: 32px 0; color: var(--muted); font-size: 0.
   <div class="grid" id="post-grid"></div>
 
   <footer>
-    <p>数据自动抓取于 Reddit 公开 API · 更新频率：每 4 小时 · 构建时间：{BUILD_TIME}</p>
+    <p>数据自动抓取于 HackerNews 官方 API + TechMeme RSS · 更新频率：每 4 小时 · 构建时间：{BUILD_TIME}</p>
   </footer>
 </div>
 
@@ -167,23 +167,23 @@ function init() {
 }
 
 function populateFilters() {
-  const subs = [...new Set(POSTS.map(p => p.subreddit))].sort();
+  const sources = [...new Set(POSTS.map(p => p.source))].sort();
   const cats = [...new Set(POSTS.map(p => p.category))].sort();
-  const subSel = document.getElementById('filter-subreddit');
+  const srcSel = document.getElementById('filter-source');
   const catSel = document.getElementById('filter-category');
-  subs.forEach(s => subSel.add(new Option(`r/${s}`, s)));
+  sources.forEach(s => srcSel.add(new Option(s, s)));
   cats.forEach(c => catSel.add(new Option(c.replace(/_/g, ' '), c)));
 }
 
 function renderStats() {
   const total = POSTS.length;
-  const subs = new Set(POSTS.map(p => p.subreddit)).size;
+  const sources = new Set(POSTS.map(p => p.source)).size;
   const revenue = POSTS.filter(p => p.has_revenue_info === 1).length;
   const today = new Date().toISOString().slice(0, 10);
   const todayCount = POSTS.filter(p => p.created_date === today).length;
   const cats = new Set(POSTS.map(p => p.category)).size;
   document.getElementById('stat-total').textContent = total;
-  document.getElementById('stat-subs').textContent = subs;
+  document.getElementById('stat-subs').textContent = sources;
   document.getElementById('stat-revenue').textContent = revenue;
   document.getElementById('stat-today').textContent = todayCount;
   document.getElementById('stat-categories').textContent = cats;
@@ -199,7 +199,7 @@ function renderBrief() {
     <div class="brief-item">
       <span class="rank">${i+1}</span>
       <a href="${p.permalink}" target="_blank">${truncate(p.title, 60)}</a>
-      <span class="meta">${p.subreddit} · ${p.score}↑ · ${p.num_comments}💬</span>
+      <span class="meta">${p.source} · ${p.score}↑ · ${p.num_comments}💬</span>
     </div>
   `).join('');
 }
@@ -211,12 +211,12 @@ function renderPosts(posts) {
     return;
   }
   el.innerHTML = posts.map(p => `
-    <div class="card" data-sub="${p.subreddit}" data-cat="${p.category}" data-sent="${p.sentiment}" data-rev="${p.has_revenue_info}">
+    <div class="card" data-sub="${p.source}" data-cat="${p.category}" data-sent="${p.sentiment}" data-rev="${p.has_revenue_info}">
       <div class="card-header">
         <div class="card-title"><a href="${p.permalink}" target="_blank">${escapeHtml(p.title)}</a></div>
       </div>
       <div class="card-meta">
-        <span class="badge badge-sub">r/${p.subreddit}</span>
+        <span class="badge badge-sub">${p.source}</span>
         <span class="badge badge-cat">${p.category.replace(/_/g, ' ')}</span>
         <span class="badge badge-sent-${p.sentiment}">${p.sentiment}</span>
         ${p.has_revenue_info ? '<span class="badge badge-revenue">$ Revenue</span>' : ''}
@@ -244,13 +244,13 @@ function renderPosts(posts) {
 }
 
 function applyFilters() {
-  const sub = document.getElementById('filter-subreddit').value;
+  const src = document.getElementById('filter-source').value;
   const cat = document.getElementById('filter-category').value;
   const sent = document.getElementById('filter-sentiment').value;
   const rev = document.getElementById('filter-revenue').value;
   const query = document.getElementById('search-input').value.toLowerCase();
   const filtered = POSTS.filter(p => {
-    if (sub && p.subreddit !== sub) return false;
+    if (src && p.source !== src) return false;
     if (cat && p.category !== cat) return false;
     if (sent && p.sentiment !== sent) return false;
     if (rev && p.has_revenue_info !== 1) return false;
@@ -264,7 +264,7 @@ function applyFilters() {
 }
 
 function clearFilters() {
-  document.getElementById('filter-subreddit').value = '';
+  document.getElementById('filter-source').value = '';
   document.getElementById('filter-category').value = '';
   document.getElementById('filter-sentiment').value = '';
   document.getElementById('filter-revenue').value = '';
