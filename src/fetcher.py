@@ -436,27 +436,33 @@ def export_json():
     return rows
 
 
-def fetch_all(hn_limit: int = 20, techmeme_limit: int = 0):
-    """抓取所有数据"""
+def fetch_all(hn_limit: int = 20, techmeme_limit: int = 5):
+    """抓取所有数据，增加超时处理"""
     init_db()
     total = 0
 
     # 1. 抓取 HackerNews
     print(f"[FETCH] HackerNews top stories (limit={hn_limit})...")
-    hn_posts = fetch_hn_stories(list_type="top", limit=hn_limit)
-    if hn_posts:
-        store_posts(hn_posts)
-        total += len(hn_posts)
-    print(f"[HN] Fetched {len(hn_posts)} posts")
+    try:
+        hn_posts = fetch_hn_stories(list_type="top", limit=hn_limit)
+        if hn_posts:
+            store_posts(hn_posts)
+            total += len(hn_posts)
+        print(f"[HN] Fetched {len(hn_posts)} posts")
+    except Exception as e:
+        print(f"[ERROR] HN fetch failed: {e}")
 
     # 2. 抓取 TechMeme（可选，设置 >0 时启用）
     if techmeme_limit > 0:
         print(f"[FETCH] TechMeme RSS (limit={techmeme_limit})...")
-        tm_posts = fetch_techmeme_rss(limit=techmeme_limit)
-        if tm_posts:
-            store_posts(tm_posts)
-            total += len(tm_posts)
-        print(f"[TechMeme] Fetched {len(tm_posts)} posts")
+        try:
+            tm_posts = fetch_techmeme_rss(limit=techmeme_limit)
+            if tm_posts:
+                store_posts(tm_posts)
+                total += len(tm_posts)
+            print(f"[TechMeme] Fetched {len(tm_posts)} posts")
+        except Exception as e:
+            print(f"[ERROR] TechMeme fetch failed: {e}")
 
     print(f"[DONE] Total fetched: {total} posts")
     return total

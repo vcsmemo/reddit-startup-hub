@@ -1,4 +1,4 @@
-name: Update Reddit Data & Deploy Site
+name: Update HN TechHub Data & Deploy Site
 
 on:
   schedule:
@@ -25,12 +25,12 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Fetch Reddit data (direct + fallback)
+      - name: Fetch HN + TechMeme data
         run: |
-          # 直接请求 Reddit（GitHub Actions IP 可能未被限制）
-          # 不设置 CF_WORKER_URL，让 fetcher 直接请求 Reddit
-          python src/fetcher.py
+          echo "Fetching HackerNews + TechMeme..."
+          python src/fetcher.py || echo "Fetch failed, will fallback to seed"
         continue-on-error: true
+        timeout-minutes: 5
 
       - name: Fallback to seed data if fetch failed
         run: |
