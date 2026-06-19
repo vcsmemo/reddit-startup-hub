@@ -1,54 +1,53 @@
 """
-HackerNews + TechMeme 创业情报站 — 核心抓取 + 提取模块
-完全免费，不需要任何 API 认证
+Reddit Startup Hub — Reddit API Fetcher (PRAW-ready)
+Fetches posts from Reddit startup communities using PRAW (Reddit API wrapper).
+Requires: pip install praw
+Environment: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD
+
+Fallback: Uses seed_mock.py data if Reddit API is not configured.
 """
-import requests
+import os
+import sqlite3
 import json
 import time
-import sqlite3
-import os
 import re
-import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
-from html import unescape
 
-# 数据存储路径
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+# Data paths
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "posts.db")
 
-# HackerNews 官方 API 端点
-HN_API_BASE = "https://hacker-news.firebaseio.com/v0"
-HN_ITEM = f"{HN_API_BASE}/item/{{id}}.json"
-HN_TOP_STORIES = f"{HN_API_BASE}/topstories.json"
-HN_NEW_STORIES = f"{HN_API_BASE}/newstories.json"
-HN_BEST_STORIES = f"{HN_API_BASE}/beststories.json"
-
-# TechMeme RSS
-TECHMEME_RSS = "https://www.techmeme.com/feed.xml"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-    "Accept": "application/json, application/xml",
-}
-
-
-# 创业/tech 关键词过滤（用于筛选帖子）
-STARTUP_KEYWORDS = [
-    "startup", "saas", "api", "ai", "llm", "open source", "bootstrapped", "mrr", "revenue",
-    "profit", "founder", "launch", "product", "tool", "platform", "framework", "library",
-    "deployment", "hosting", "pricing", "acquisition", "funding", "vc", "angel", "investor",
-    "side project", "side project", "indie", "solo founder", "remote", "devops", "kubernetes",
-    "docker", "postgres", "redis", "react", "next.js", "typescript", "python", "golang", "rust",
-    "stripe", "vercel", "supabase", "firebase", "openai", "gpt", "claude", "langchain",
-    "rag", "vector", "embeddings", "machine learning", "deep learning", "automation",
-    "chatbot", "agent", "workflow", "email", "marketing", "analytics", "seo", "content",
-    "no-code", "low-code", "nocode", "lowcode", "bubble", "webflow", "zapier", "make",
-    "b2b", "b2c", "enterprise", "small business", "freelancer", "consultant", "agency",
-    "chrome extension", "browser extension", "mobile app", "web app", "desktop app",
-    "open source", "github", "source code", "repository", "self-hosted", "self hosted",
+# Target subreddits for startup/SaaS/AI content
+TARGET_SUBREDDITS = [
+    "SaaS", "startups", "indiehackers", "Entrepreneur",
+    "SideProject", "bootstrapped", "Startup_Ideas", "ExperiencedDevs",
+    "SaaS_Chat", "buildinpublic", "microsaas",
 ]
+
+# Keywords for startup relevance detection
+STARTUP_KEYWORDS = [
+    "startup", "saas", "mrr", "arr", "revenue", "profit", "launch", "shipped",
+    "bootstrapped", "bootstrap", "funding", "vc", "angel", "investor", "pitch",
+    "product", "mvp", "prototype", "validation", "feedback", "users", "customers",
+    "growth", "marketing", "seo", "traffic", "acquisition", "retention", "churn",
+    "pricing", "monetization", "subscription", "freemium", "trial", "stripe",
+    "tech stack", "stack", "framework", "database", "hosting", "architecture",
+    "open source", "github", "api", "webhook", "integration",
+    "ai", "llm", "gpt", "claude", "openai", "machine learning", "automation",
+    "side project", "side hustle", "passive income", "indie hacker", "solopreneur",
+    "founder", "co-founder", "team", "hiring", "remote", "freelancer", "consultant",
+    "agency", "developer", "engineer", "designer", "product manager",
+    "lessons learned", "mistake", "regret", "what i wish", "post-mortem", "reflection",
+    "burnout", "struggle", "failed", "quit", "shut down", "closed",
+]
+
+# Revenue patterns
+REVENUE_PATTERNS = re.compile(
+    r"\$[\d,.]+[kmbKMB]?\s*(?:/month|mrr|monthly|revenue|arr|year|mo|annual|/mo|per month|/year|/yr)?",
+    re.IGNORECASE,
+)
 
 
 def ensure_dirs():
@@ -56,15 +55,15 @@ def ensure_dirs():
 
 
 def init_db():
-    """初始化 SQLite 数据库"""
+    """Initialize SQLite database with full schema."""
     ensure_dirs()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        """
+    c.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id TEXT PRIMARY KEY,
             source TEXT NOT NULL,
+            subreddit TEXT NOT NULL,
             title TEXT NOT NULL,
             author TEXT,
             score INTEGER,
@@ -85,241 +84,106 @@ def init_db():
             fetched_at TEXT,
             extracted_at TEXT
         )
-    """
-    )
+    """)
     conn.commit()
     conn.close()
 
 
-def clean_html(text: str) -> str:
-    """清理 HTML 实体和标签"""
-    if not text:
-        return ""
-    text = unescape(text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:5000]
-
-
-def is_startup_related(title: str, text: str = "") -> bool:
-    """判断帖子是否与创业/tech 相关"""
-    combined = (title + " " + text).lower()
-    return any(kw in combined for kw in STARTUP_KEYWORDS)
-
-
-def fetch_hn_item(item_id: int) -> Optional[Dict]:
-    """获取单个 HackerNews 帖子详情"""
-    try:
-        url = HN_ITEM.format(id=item_id)
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        print(f"  [WARN] Failed to fetch item {item_id}: {e}")
-    return None
-
-
-def fetch_hn_stories(list_type: str = "top", limit: int = 100) -> List[Dict]:
-    """从 HackerNews 获取帖子列表，不做关键词过滤，让提取器自动分类"""
-    if list_type == "top":
-        list_url = HN_TOP_STORIES
-    elif list_type == "new":
-        list_url = HN_NEW_STORIES
-    elif list_type == "best":
-        list_url = HN_BEST_STORIES
-    else:
-        list_url = HN_TOP_STORIES
-
-    try:
-        r = requests.get(list_url, timeout=15)
-        r.raise_for_status()
-        story_ids = r.json()[:limit]
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch HN story list: {e}")
-        return []
-
-def fetch_hn_stories(list_type: str = "top", limit: int = 50, max_workers: int = 10) -> List[Dict]:
-    """从 HackerNews 获取帖子列表，并行请求加速"""
-    if list_type == "top":
-        list_url = HN_TOP_STORIES
-    elif list_type == "new":
-        list_url = HN_NEW_STORIES
-    elif list_type == "best":
-        list_url = HN_BEST_STORIES
-    else:
-        list_url = HN_TOP_STORIES
-
-    try:
-        r = requests.get(list_url, timeout=15)
-        r.raise_for_status()
-        story_ids = r.json()[:limit]
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch HN story list: {e}")
-        return []
-
-    posts = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_id = {executor.submit(fetch_hn_item, sid): sid for sid in story_ids}
-        for future in as_completed(future_to_id):
-            item = future.result()
-            if item and item.get("type") == "story":
-                title = item.get("title", "")
-                text = item.get("text", "")
-                posts.append({
-                    "id": str(item.get("id")),
-                    "source": "hackernews",
-                    "title": title,
-                    "author": item.get("by", ""),
-                    "score": item.get("score", 0),
-                    "num_comments": item.get("descendants", 0),
-                    "upvote_ratio": 0,
-                    "url": item.get("url", ""),
-                    "selftext": clean_html(text) if text else "",
-                    "created_utc": item.get("time", 0),
-                    "permalink": f"https://news.ycombinator.com/item?id={item.get('id')}",
-                })
-    return posts
-
-
-def fetch_techmeme_rss(limit: int = 20) -> List[Dict]:
-    """从 TechMeme RSS 获取科技新闻"""
-    try:
-        r = requests.get(TECHMEME_RSS, headers=HEADERS, timeout=15)
-        if r.status_code != 200:
-            print(f"  [WARN] TechMeme RSS returned {r.status_code}")
-            return []
-
-        root = ET.fromstring(r.text)
-        items = root.findall(".//item")
-        posts = []
-
-        for item in items[:limit]:
-            title_el = item.find("title")
-            link_el = item.find("link")
-            desc_el = item.find("description")
-            pub_date_el = item.find("pubDate")
-
-            title = title_el.text if title_el is not None else ""
-            url = link_el.text if link_el is not None else ""
-            desc = desc_el.text if desc_el is not None and desc_el.text else ""
-            pub_date = pub_date_el.text if pub_date_el is not None else ""
-
-            # 只保留与 tech/创业 相关的新闻
-            if is_startup_related(title, desc):
-                # 解析日期
-                created_utc = 0
-                if pub_date:
-                    try:
-                        dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z")
-                        created_utc = dt.timestamp()
-                    except ValueError:
-                        pass
-
-                # 生成唯一 ID
-                post_id = re.sub(r'[^a-zA-Z0-9]', '_', title[:30]) + str(int(created_utc))[:6]
-
-                posts.append({
-                    "id": post_id,
-                    "source": "techmeme",
-                    "title": title,
-                    "author": "techmeme",
-                    "score": 0,
-                    "num_comments": 0,
-                    "upvote_ratio": 0,
-                    "url": url,
-                    "selftext": clean_html(desc)[:1000],
-                    "created_utc": created_utc,
-                    "permalink": url,
-                })
-
-        return posts
-    except Exception as e:
-        print(f"  [ERROR] Failed to fetch TechMeme: {e}")
-        return []
-
-
-def extract_structured_info(title: str, body: str, source: str = "") -> Dict[str, Any]:
-    """用规则 + 关键词匹配做结构化提取"""
+def extract_structured_info(title: str, body: str, subreddit: str = "") -> Dict[str, Any]:
+    """AI-style structured extraction from Reddit post text."""
     text = f"{title} {body}".lower()
     full_text = f"{title} {body}"
 
-    # 1. 检测收入/MRR 信息
-    revenue_patterns = re.findall(
-        r"\$[\d,.]+[kmb]?\s*(?:/month|mrr|monthly|revenue|arr|year|mo|annual|month)",
-        full_text,
-        re.IGNORECASE,
-    )
-    has_revenue = len(revenue_patterns) > 0
+    # 1. Revenue detection
+    revenue_matches = REVENUE_PATTERNS.findall(full_text)
+    has_revenue = len(revenue_matches) > 0
 
-    # 2. 检测技术栈关键词
+    # 2. Tech stack keywords
     tech_keywords = [
-        "react", "next.js", "vue", "angular", "svelte", "solidjs",
-        "python", "django", "flask", "fastapi", "nodejs", "node.js", "express", "typescript",
+        "react", "next.js", "vue", "svelte", "angular", "solidjs",
+        "python", "django", "flask", "fastapi", "nodejs", "node.js", "express", "typescript", "javascript", "js",
         "go", "golang", "rust", "c++", "c#", "java", "kotlin", "swift", "ruby", "rails", "php", "laravel",
         "aws", "gcp", "azure", "cloudflare", "vercel", "netlify", "heroku", "railway", "digitalocean", "hetzner", "vultr", "linode",
-        "docker", "kubernetes", "k8s", "terraform", "ansible", "pulumi",
-        "postgres", "postgresql", "mysql", "mariadb", "mongodb", "redis", "sqlite", "dynamodb", "cockroachdb", "planetscale", "supabase", "firebase", "faunadb", "cassandra",
-        "stripe", "paddle", "lemonsqueezy", "chargebee", "paypal", "square", "braintree",
+        "docker", "kubernetes", "k8s", "terraform", "ansible", "pulumi", "github actions", "ci/cd",
+        "postgres", "postgresql", "mysql", "mariadb", "mongodb", "redis", "sqlite", "dynamodb", "cockroachdb", "planetscale", "supabase", "firebase", "faunadb", "cassandra", "clickhouse",
+        "stripe", "paddle", "lemonsqueezy", "chargebee", "paypal", "square", "braintree", "paystack", "razorpay",
         "tailwind", "bootstrap", "material-ui", "chakra-ui", "shadcn", "radix",
         "openai", "gpt", "gpt-4", "gpt-3", "claude", "anthropic", "llama", "llama2", "llama3", "mistral", "mixtral", "gemini", "groq",
         "langchain", "llamaindex", "crewai", "haystack", "embedchain", "auto-gpt", "babyagi",
-        "vector", "embedding", "embedding", "transformer", "huggingface", "transformers",
-        "nextauth", "auth0", "clerk", "supabase auth", "firebase auth",
-        "plausible", "fathom", "mixpanel", "amplitude", "segment", "posthog", "umami",
-        "postmark", "resend", "mailgun", "sendgrid", "twilio", "sendgrid",
-        "cloudflare workers", "serverless", "lambda", "edge function",
-        "websocket", "graphql", "rest", "grpc", "tRPC", "tRPC", "openapi", "swagger",
+        "vector", "embedding", "transformer", "huggingface", "transformers", "ollama",
+        "nextauth", "auth0", "clerk", "supabase auth", "firebase auth", "passport",
+        "plausible", "fathom", "mixpanel", "amplitude", "segment", "posthog", "umami", "google analytics", "ga4",
+        "postmark", "resend", "mailgun", "sendgrid", "twilio", "sendinblue", "brevo", "mailchimp",
+        "cloudflare workers", "serverless", "lambda", "edge function", "cloud function",
+        "websocket", "graphql", "rest", "grpc", "trpc", "openapi", "swagger", "fastapi",
+        "bubble", "webflow", "carrd", "notion", "airtable", "make", "zapier", "n8n",
+        "electron", "tauri", "flutter", "react native", "swiftui", "jetpack compose",
+        "nginx", "caddy", "apache", "traefik", "haproxy",
+        "prometheus", "grafana", "datadog", "new relic", "sentry", "logrocket", "bugsnag",
+        "vite", "webpack", "rollup", "parcel", "esbuild", "turbopack", "bun",
+        "redis", "memcached", "elasticsearch", "meilisearch", "algolia", "typesense",
+        "ffmpeg", "opencv", "pytorch", "tensorflow", "jax", "scikit-learn", "pandas", "numpy",
     ]
     tech_stack = [kw for kw in tech_keywords if kw.lower() in text]
 
-    # 3. 检测痛点关键词
+    # 3. Pain points
     pain_keywords = [
-        "pain point", "painpoint", "frustrated", "struggling", "annoying", "hate", "wish there was", "tired of",
-        "problem", "challenge", "difficult", "hard to", "tricky", "painful", "tedious", "manual",
-        "waste time", "wasting time", "inefficient", "bottleneck", "headache", "nightmare",
-        "can't find", "hard to find", "no good way", "no easy way", "too complicated", "too complex",
-        "slow", "unreliable", "broken", "buggy", "outdated", "legacy", "technical debt",
+        "pain point", "painpoint", "frustrated", "frustrating", "struggling", "struggle",
+        "annoying", "annoyed", "hate", "hated", "wish there was", "tired of", "sick of", "fed up with",
+        "problem", "problems", "challenge", "challenging", "difficult", "difficulty", "hard to", "tricky", "painful", "tedious",
+        "waste time", "wasting time", "wasted", "inefficient", "bottleneck", "headache", "nightmare", "horror story",
+        "can't find", "hard to find", "no good way", "no easy way", "too complicated", "too complex", "overcomplicated", "overengineered",
+        "slow", "unreliable", "broken", "buggy", "outdated", "legacy", "technical debt", "spaghetti code",
+        "burnout", "burn out", "burnt out", "depressed", "depression", "anxiety", "anxious", "stress", "stressed", "overwhelmed",
+        "failed", "failure", "shut down", "shutdown", "closed", "closing", "winding down", "bankrupt", "bankruptcy",
+        "no customers", "zero revenue", "zero mrr", "no sales", "no traction", "no users", "no growth",
+        "wasted", "waste of", "regret", "regretting", "mistake", "mistaken", "wrong", "bad decision",
+        "rejected", "rejection", "denied", "declined", "turned down", "not enough", "insufficient",
     ]
     pain_point = [kw for kw in pain_keywords if kw in text]
 
-    # 4. 目标受众检测
+    # 4. Target audience
     audience_keywords = [
-        "developer", "dev", "engineer", "programmer", "coder",
-        "founder", "co-founder", "cofounder", "entrepreneur", "startup founder",
-        "freelancer", "consultant", "contractor",
-        "agency", "studio", "shop",
-        "marketer", "growth", "sales", "pm", "product manager",
-        "designer", "ux designer", "ui designer",
-        "content creator", "youtuber", "blogger", "writer",
-        "small business", "smb", "sme",
-        "ecommerce", "e-commerce", "shopify", "woocommerce",
-        "saas", "b2b", "b2c", "enterprise", "team", "remote team", "distributed team",
-        "indie hacker", "indie maker", "solopreneur", "solo founder",
-        "data scientist", "ml engineer", "ai researcher",
-        "student", "learner", "beginner",
+        "developer", "dev", "engineer", "programmer", "coder", "software engineer", "backend", "frontend", "fullstack", "full-stack",
+        "founder", "co-founder", "cofounder", "entrepreneur", "startup founder", "solopreneur", "indie hacker", "indie maker",
+        "freelancer", "consultant", "contractor", "agency", "studio", "shop",
+        "marketer", "growth hacker", "growth marketer", "sales", "pm", "product manager", "product owner",
+        "designer", "ux designer", "ui designer", "graphic designer", "web designer",
+        "content creator", "youtuber", "blogger", "writer", "podcaster", "influencer",
+        "small business", "smb", "sme", "enterprise", "large company", "fortune 500",
+        "ecommerce", "e-commerce", "shopify", "woocommerce", "dropshipper", "dropshipping",
+        "saas", "b2b", "b2c", "team", "remote team", "distributed team", "hybrid team",
+        "data scientist", "ml engineer", "ai researcher", "researcher", "analyst",
+        "student", "learner", "beginner", "newbie", "junior", "senior", "lead", "staff", "principal",
+        "non-technical", "no-code", "nocode", "citizen developer", "business user", "manager", "executive", "c-level", "cto", "ceo",
+        "dentist", "lawyer", "accountant", "realtor", "photographer", "videographer", "musician", "artist",
+        "teacher", "educator", "coach", "trainer", "therapist", "doctor", "nurse", "chef", "farmer",
     ]
     target_audience = [kw for kw in audience_keywords if kw in text]
 
-    # 5. 情绪判断
+    # 5. Sentiment analysis
     positive_words = [
-        "launch", "launched", "shipped", "release", "released", "announcing", "introducing", "proud to",
-        "revenue", "mrr", "arr", "profit", "profitable", "growth", "growing", "scaling", "scale",
-        "success", "successful", "milestone", "achievement", "breakthrough", "momentum",
-        "built", "created", "made", "built this", "i made", "we built",
-        "thank you", "grateful", "appreciate", "excited", "thrilled", "proud", "happy", "love",
-        "bootstrapped", "self-funded", " ramen profitable", " ramen profitable",
-        "free", "open source", "open-source", "community", "contributors",
+        "launch", "launched", "shipped", "release", "released", "announcing", "introducing", "proud to", "excited to",
+        "revenue", "mrr", "arr", "profit", "profitable", "growth", "growing", "scaling", "scale", "scaling up",
+        "success", "successful", "milestone", "achievement", "breakthrough", "momentum", "traction",
+        "built", "created", "made", "built this", "i made", "we built", "i created", "we created", "shipped this",
+        "thank you", "grateful", "appreciate", "excited", "thrilled", "proud", "happy", "love", "loved", "amazing", "awesome", "incredible",
+        "bootstrapped", "self-funded", "ramen profitable", "cash flow positive", "break even", "break-even",
+        "free", "open source", "open-source", "community", "contributors", "stars", "forks",
+        "hired", "hiring", "team", "growing team", "new member", "welcome", "joined",
+        "acquired", "acquisition", "exit", "ipo", "sold", "deal", "partnership", "collaboration",
+        "recommend", "highly recommend", "must try", "game changer", "life changing", "transformed",
     ]
     negative_words = [
-        "failed", "failure", "shut down", "shutdown", "closed", "closing", "winding down",
-        "burnout", "burn out", "burnt out", "struggling", "struggle", "frustrated", "frustrating",
-        "depressed", "depression", "anxiety", "anxious", "stress", "stressed", "overwhelmed",
-        "quit", "quitting", "resigned", "fired", "layoff", "laid off", "laid off",
-        "bankrupt", "bankruptcy", "insolvent", "dead", "killed", "died",
-        "no customers", "zero revenue", "zero mrr", "no sales", "no traction", "no users",
-        "wasted", "waste of", "regret", "regretting", "mistake", "mistaken", "wrong",
-        "burned", "burned out", "exhausted", "tired", "hate this", "hate my job",
-        "rejected", "rejection", "denied", "declined", "turned down", "no",
+        "failed", "failure", "shut down", "shutdown", "closed", "closing", "winding down", "wound down",
+        "burnout", "burn out", "burnt out", "depressed", "depression", "anxiety", "anxious", "stress", "stressed", "overwhelmed",
+        "quit", "quitting", "resigned", "fired", "layoff", "laid off", "laid off", "redundant", "let go",
+        "bankrupt", "bankruptcy", "insolvent", "dead", "killed", "died", "crashed", "collapse", "collapsing",
+        "no customers", "zero revenue", "zero mrr", "no sales", "no traction", "no users", "no growth", "stagnant", "flatlined",
+        "wasted", "waste of", "regret", "regretting", "mistake", "mistaken", "wrong", "bad decision", "terrible idea", "worst",
+        "rejected", "rejection", "denied", "declined", "turned down", "no", "not accepted", "not approved",
+        "hate", "hated", "terrible", "awful", "horrible", "disgusting", "worst", "crap", "shit", "fuck", "damn",
+        "scam", "fraud", "fake", "lie", "lying", "deceptive", "misleading", "dishonest",
     ]
     pos_count = sum(1 for w in positive_words if w in text)
     neg_count = sum(1 for w in negative_words if w in text)
@@ -330,18 +194,20 @@ def extract_structured_info(title: str, body: str, source: str = "") -> Dict[str
     else:
         sentiment = "neutral"
 
-    # 6. 分类
+    # 6. Category classification
     categories = {
-        "show_hn": ["show hn", "show-hn", "showhn", "launched", "i built", "i made", "we built", "we launched"],
-        "ask_hn": ["ask hn", "ask-hn", "askhn", "how do i", "how can i", "should i", "advice", "feedback", "question"],
-        "revenue": ["mrr", "revenue", "arr", "profit", "income", "earnings", "sales", "paid", "pricing", "monetization", "subscription", "pricing model"],
-        "growth": ["growth", "marketing", "seo", "traffic", "acquisition", "conversion", "retention", "churn", "users", "user acquisition", "customer acquisition"],
-        "tech_stack": ["stack", "technology", "framework", "database", "hosting", "infrastructure", "architecture", "tech stack", "built with", "using"],
-        "hiring": ["hiring", "we're hiring", "join us", "careers", "job opening", "looking for", "co-founder", "cofounder", "partner"],
-        "funding": ["funding", "raised", "seed", "series", "investor", "investment", "vc", "venture capital", "angel", "y combinator", "yc", "accelerator"],
-        "lessons": ["lessons", "learned", "mistake", "regret", "what i wish", "reflection", "post-mortem", "postmortem", "post mortem", "retrospective"],
-        "open_source": ["open source", "open-source", "github", "source code", "repository", "repo", "self-hosted", "self hosted"],
-        "ai_ml": ["ai", "machine learning", "deep learning", "llm", "gpt", "claude", "openai", "langchain", "vector", "embedding", "rag", "fine-tuning", "fine tuning"],
+        "showcase": ["show hn", "show-hn", "showhn", "launched", "shipped", "released", "live", "announcing", "introducing", "proud to", "excited to launch", "we launched", "i launched", "just launched"],
+        "ask_feedback": ["ask hn", "ask-hn", "askhn", "how do i", "how can i", "should i", "advice", "feedback", "question", "thoughts", "opinions", "what do you think", "would you use", "would you pay"],
+        "revenue": ["mrr", "revenue", "arr", "profit", "income", "earnings", "sales", "paid", "pricing", "monetization", "subscription", "charged", "billing", "pricing model", "price increase", "raised prices"],
+        "growth_marketing": ["growth", "marketing", "seo", "traffic", "acquisition", "conversion", "retention", "churn", "users", "user acquisition", "customer acquisition", "viral", "word of mouth", "organic", "content marketing", "social media", "twitter", "linkedin", "product hunt"],
+        "tech_stack": ["stack", "technology", "framework", "database", "hosting", "infrastructure", "architecture", "tech stack", "built with", "using", "migrated", "switched from", "moved to", "why we chose", "why i chose"],
+        "hiring_team": ["hiring", "we're hiring", "join us", "careers", "job opening", "looking for", "co-founder", "cofounder", "partner", "team member", "employee", "contractor", "freelancer", "advisor"],
+        "funding": ["funding", "raised", "seed", "series a", "series b", "angel", "investor", "investment", "vc", "venture capital", "y combinator", "yc", "accelerator", "bootstrapped vs", "raise or bootstrap", "valuation"],
+        "lessons": ["lessons", "learned", "lesson", "mistake", "mistakes", "regret", "what i wish", "reflection", "post-mortem", "postmortem", "post mortem", "retrospective", "what went wrong", "what went right", "if i could do it again", "looking back"],
+        "open_source": ["open source", "open-source", "github", "source code", "repository", "repo", "self-hosted", "self hosted", "contribute", "contributor", "license", "mit", "gpl", "apache"],
+        "ai_ml": ["ai", "artificial intelligence", "machine learning", "deep learning", "llm", "gpt", "claude", "openai", "langchain", "vector", "embedding", "rag", "fine-tuning", "fine tuning", "fine-tune", "prompt engineering", "agents", "agentic"],
+        "no_code": ["no-code", "no code", "low-code", "low code", "nocode", "lowcode", "bubble", "webflow", "carrd", "zapier", "make", "n8n", "glide", "softr", "flutterflow", "adalo"],
+        "burnout_mental": ["burnout", "burn out", "burnt out", "mental health", "depression", "anxiety", "stress", "therapy", "work life balance", "work-life balance", "overworked", "exhausted", "imposter syndrome", "impostor syndrome"],
     }
     matched_cats = []
     for cat, words in categories.items():
@@ -349,13 +215,13 @@ def extract_structured_info(title: str, body: str, source: str = "") -> Dict[str
             matched_cats.append(cat)
     category = matched_cats[0] if matched_cats else "general"
 
-    # 7. 生成摘要
-    summary = full_text[:300].strip()
+    # 7. Summary generation
+    summary = full_text[:280].strip()
 
     return {
         "extracted_summary": summary,
         "has_revenue_info": has_revenue,
-        "revenue_pattern": ", ".join(revenue_patterns[:3]) if revenue_patterns else "",
+        "revenue_pattern": ", ".join(revenue_matches[:3]) if revenue_matches else "",
         "tech_stack": ", ".join(tech_stack) if tech_stack else "",
         "target_audience": ", ".join(target_audience) if target_audience else "",
         "pain_point": ", ".join(pain_point) if pain_point else "",
@@ -365,67 +231,63 @@ def extract_structured_info(title: str, body: str, source: str = "") -> Dict[str
 
 
 def store_posts(posts: List[Dict]):
-    """将帖子存入 SQLite 数据库"""
+    """Store posts into SQLite database."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = datetime.now(timezone.utc).isoformat()
 
     for post in posts:
-        info = extract_structured_info(post["title"], post["selftext"], post.get("source", ""))
-        c.execute(
-            """
+        info = extract_structured_info(post.get("title", ""), post.get("selftext", ""), post.get("subreddit", ""))
+        c.execute("""
             INSERT OR REPLACE INTO posts VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
-        """,
-            (
-                post["id"],
-                post.get("source", "hackernews"),
-                post["title"],
-                post["author"],
-                post["score"],
-                post["num_comments"],
-                post.get("upvote_ratio", 0),
-                post.get("url", ""),
-                post["selftext"],
-                post["created_utc"],
-                post["permalink"],
-                info["extracted_summary"],
-                1 if info["has_revenue_info"] else 0,
-                info["revenue_pattern"],
-                info["tech_stack"],
-                info["target_audience"],
-                info["pain_point"],
-                info["sentiment"],
-                info["category"],
-                now,
-                now,
-            ),
-        )
+        """, (
+            post["id"],
+            post.get("source", "reddit"),
+            post.get("subreddit", ""),
+            post["title"],
+            post.get("author", ""),
+            post.get("score", 0),
+            post.get("num_comments", 0),
+            post.get("upvote_ratio", 0),
+            post.get("url", ""),
+            post.get("selftext", ""),
+            post.get("created_utc", 0),
+            post.get("permalink", ""),
+            info["extracted_summary"],
+            1 if info["has_revenue_info"] else 0,
+            info["revenue_pattern"],
+            info["tech_stack"],
+            info["target_audience"],
+            info["pain_point"],
+            info["sentiment"],
+            info["category"],
+            now,
+            now,
+        ))
     conn.commit()
     conn.close()
     print(f"[STORE] Stored {len(posts)} posts to DB")
 
 
-def export_json():
-    """导出为 JSON 供前端使用"""
+def export_json() -> List[Dict]:
+    """Export posts to JSON for frontend."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    c.execute(
-        """
+    c.execute("""
         SELECT * FROM posts
         ORDER BY score DESC, num_comments DESC
         LIMIT 500
-    """
-    )
+    """)
     rows = [dict(row) for row in c.fetchall()]
     conn.close()
 
     for row in rows:
         row["created_date"] = (
             datetime.fromtimestamp(row["created_utc"], tz=timezone.utc).strftime("%Y-%m-%d")
-            if row["created_utc"] > 0
+            if row["created_utc"] and row["created_utc"] > 0
             else "unknown"
         )
 
@@ -436,61 +298,87 @@ def export_json():
     return rows
 
 
-def fetch_all(hn_limit: int = 20, techmeme_limit: int = 5):
-    """抓取所有数据，增加超时处理"""
+# ---------------------------------------------------------------------------
+# Reddit PRAW Fetcher (requires API credentials)
+# ---------------------------------------------------------------------------
+
+def fetch_reddit_with_praw(limit_per_sub: int = 25, sort: str = "hot") -> int:
+    """Fetch posts from Reddit using PRAW (official API). Requires env vars."""
+    try:
+        import praw
+    except ImportError:
+        print("[ERROR] praw not installed. Run: pip install praw")
+        return 0
+
+    client_id = os.environ.get("REDDIT_CLIENT_ID")
+    client_secret = os.environ.get("REDDIT_CLIENT_SECRET")
+    username = os.environ.get("REDDIT_USERNAME")
+    password = os.environ.get("REDDIT_PASSWORD")
+    user_agent = os.environ.get("REDDIT_USER_AGENT", "RedditStartupHub/1.0")
+
+    if not all([client_id, client_secret, username, password]):
+        print("[ERROR] Reddit API credentials not configured. Set env vars: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD")
+        return 0
+
+    reddit = praw.Reddit(
+        client_id=client_id,
+        client_secret=client_secret,
+        username=username,
+        password=password,
+        user_agent=user_agent,
+    )
+
     init_db()
     total = 0
 
-    # 1. 抓取 HackerNews
-    print(f"[FETCH] HackerNews top stories (limit={hn_limit})...")
-    try:
-        hn_posts = fetch_hn_stories(list_type="top", limit=hn_limit)
-        if hn_posts:
-            store_posts(hn_posts)
-            total += len(hn_posts)
-        print(f"[HN] Fetched {len(hn_posts)} posts")
-    except Exception as e:
-        print(f"[ERROR] HN fetch failed: {e}")
-
-    # 2. 抓取 TechMeme（可选，设置 >0 时启用）
-    if techmeme_limit > 0:
-        print(f"[FETCH] TechMeme RSS (limit={techmeme_limit})...")
+    for sub_name in TARGET_SUBREDDITS:
+        print(f"[FETCH] r/{sub_name} ...")
         try:
-            tm_posts = fetch_techmeme_rss(limit=techmeme_limit)
-            if tm_posts:
-                store_posts(tm_posts)
-                total += len(tm_posts)
-            print(f"[TechMeme] Fetched {len(tm_posts)} posts")
+            sub = reddit.subreddit(sub_name)
+            method = getattr(sub, sort, sub.hot)
+            posts = []
+            for post in method(limit=limit_per_sub):
+                posts.append({
+                    "id": post.id,
+                    "source": "reddit",
+                    "subreddit": post.subreddit.display_name,
+                    "title": post.title,
+                    "author": str(post.author) if post.author else None,
+                    "score": post.score,
+                    "num_comments": post.num_comments,
+                    "upvote_ratio": post.upvote_ratio,
+                    "url": post.url,
+                    "selftext": post.selftext,
+                    "created_utc": post.created_utc,
+                    "permalink": f"https://www.reddit.com{post.permalink}",
+                })
+            if posts:
+                store_posts(posts)
+                total += len(posts)
+            time.sleep(1)
         except Exception as e:
-            print(f"[ERROR] TechMeme fetch failed: {e}")
+            print(f"  [ERROR] r/{sub_name}: {e}")
 
     print(f"[DONE] Total fetched: {total} posts")
     return total
 
 
-def demo_hn(limit: int = 10):
-    """演示模式：抓取 HackerNews 并展示"""
-    print(f"\n=== Demo: Fetching HackerNews top stories (limit={limit}) ===")
-    posts = fetch_hn_stories(list_type="top", limit=limit)
-    for p in posts:
-        print(f"\n--- [{p['source']}] {p['title'][:80]}...")
-        print(f"Author: {p['author']} | Score: {p['score']}↑ | Comments: {p['num_comments']}💬")
-        print(f"Permalink: {p['permalink']}")
-        if p["selftext"]:
-            print(f"Text: {p['selftext'][:200]}...")
-        elif p["url"]:
-            print(f"URL: {p['url'][:80]}...")
-    print(f"\nFetched {len(posts)} startup-related posts from HackerNews")
+def fetch_all():
+    """Main entry point: try PRAW, fallback to seed data."""
+    result = fetch_reddit_with_praw(limit_per_sub=25, sort="hot")
+    if result == 0:
+        print("[INFO] Reddit API not configured. Using seed data.")
+        # Import and run seed_mock
+        import sys
+        sys.path.insert(0, os.path.join(BASE_DIR, "src"))
+        from seed_mock import seed_mock_data
+        seed_mock_data()
+    export_json()
 
 
 if __name__ == "__main__":
     import sys
-
-    if len(sys.argv) > 1 and sys.argv[1] == "demo":
-        limit = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-        demo_hn(limit)
-    elif len(sys.argv) > 1 and sys.argv[1] == "export":
+    if len(sys.argv) > 1 and sys.argv[1] == "export":
         export_json()
     else:
-        fetch_all(hn_limit=50, techmeme_limit=10)
-        export_json()
+        fetch_all()

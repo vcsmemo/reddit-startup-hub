@@ -1,9 +1,9 @@
-name: Update HN TechHub Data & Deploy Site
+name: Update Reddit Startup Hub & Deploy Site
 
 on:
   schedule:
-    - cron: '0 */4 * * *'  # 每 4 小时运行一次
-  workflow_dispatch:        # 支持手动触发
+    - cron: '0 */4 * * *'  # Every 4 hours
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,19 +23,24 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
-
-      - name: Fetch HN + TechMeme data
         run: |
-          echo "Fetching HackerNews + TechMeme..."
-          python src/fetcher.py || echo "Fetch failed, will fallback to seed"
-        continue-on-error: true
-        timeout-minutes: 5
+          pip install praw requests
 
-      - name: Fallback to seed data if fetch failed
+      - name: Fetch Reddit data (PRAW API)
+        run: |
+          python src/fetcher.py
+        env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+          REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+        continue-on-error: true
+        timeout-minutes: 10
+
+      - name: Fallback to seed data if Reddit API not configured
         run: |
           if [ ! -f data/posts.json ] || [ ! -s data/posts.json ]; then
-            echo "No data fetched, using seed data..."
+            echo "Reddit API not configured or failed. Using seed data..."
             python src/seed_mock.py
           fi
         continue-on-error: true
@@ -49,5 +54,3 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./static
-          # 可选: 自定义域名
-          # cname: your-custom-domain.com
